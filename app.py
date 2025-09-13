@@ -1,79 +1,90 @@
 from fastapi import FastAPI
 import yfinance as yf
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from datetime import date
 import os
 import uvicorn
 from dotenv import load_dotenv
+from db import create_tables  # ✅ Import DB setup
 
 from llm import generate_llm_insights
+
 app = FastAPI()
 load_dotenv()
+create_tables()  # Ensure tables are created on startup
 # --- Environment ---
 DB_URL = os.getenv("DB_URL")
-
-TICKERS=["SOFI","PYPL","HOOD"]
-
 engine = create_engine(DB_URL)
 
-#ETL Functions
+TICKERS = ["SOFI", "PYPL", "HOOD"]
+
+# --- ETL Functions ---
 def fetch_stock_data(tickers):
     df_list = []
     data = yf.download(tickers, period="1d")  # multi-index DataFrame
 
     for t in tickers:
-        # Extract scalar values from the last row
-        open_price = data['Open'][t].iloc[-1]
-        high_price = data['High'][t].iloc[-1]
-        low_price = data['Low'][t].iloc[-1]
-        close_price = data['Close'][t].iloc[-1]
-        volume = data['Volume'][t].iloc[-1]
-        date_val = data.index[-1].date()
-
-        df_list.append({
-            "date": date_val,
+        row = {
+            "date": data.index[-1].date(),
             "ticker": t,
-            "open_price": open_price,
-            "high_price": high_price,
-            "low_price": low_price,
-            "close_price": close_price,
-            "volume": volume
-        })
+            "open_price": float(data['Open'][t].iloc[-1]),
+            "high_price": float(data['High'][t].iloc[-1]),
+            "low_price": float(data['Low'][t].iloc[-1]),
+            "close_price": float(data['Close'][t].iloc[-1]),
+            "volume": int(data['Volume'][t].iloc[-1])
+        }
+        df_list.append(row)
 
     return pd.DataFrame(df_list)
 
-# --- Insert into PostgreSQL ---
+
 def insert_stock_data(df):
-    # Ensure all columns are scalar types
-    df = df.astype({
-        "open_price": float,
-        "high_price": float,
-        "low_price": float,
-        "close_price": float,
-        "volume": int
-    })
-    df.to_sql("daily_stock_prices", engine, if_exists="append", index=False)
-#---  Insert LLM insights into PostgreSQL ---`
+    with engine.begin() as conn:
+        for _, row in df.iterrows():
+            conn.execute(text("""
+                INSERT INTO daily_stock_prices (date, ticker, open_price, high_price, low_price, close_price, volume)
+                VALUES (:date, :ticker, :open_price, :high_price, :low_price, :close_price, :volume)
+                ON CONFLICT (date, ticker) DO NOTHING;
+            """), row.to_dict())
+
+
 def insert_insights(prompt, response, df):
-    rec_df = pd.DataFrame([{
-        "date": df['date'].iloc[0],
-        "ticker": None,
-        "prompt": str(prompt),
-        "response": str(response)
-    }])
-    rec_df.to_sql("daily_stock_insights", engine, if_exists="append", index=False)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO daily_stock_insights (date, ticker, prompt, response)
+            VALUES (:date, :ticker, :prompt, :response)
+        """), {
+            "date": df['date'].iloc[0],
+            "ticker": None,  # global insight for all tickers
+            "prompt": str(prompt),
+            "response": str(response)
+        })
 
 
-
-# --- 5. Daily ETL Endpoint ---
+# --- API Endpoint ---
 @app.get("/run-daily-pipeline")
 def run_daily_pipeline():
+    # 1. Fetch stock data
     df = fetch_stock_data(TICKERS)
+
+    # 2. Insert into DB
     insert_stock_data(df)
+
+    # 3. Generate LLM insights
     prompt, response = generate_llm_insights(df)
+
+    # 4. Insert insights into DB
     insert_insights(prompt, response, df)
-    return {"status": "success", "message": "Daily pipeline completed."}
+
+    # 5. Return final results in API response
+    return {
+        "status": "success",
+        "date": str(df['date'].iloc[0]),
+        "tickers": df.to_dict(orient="records"),
+        "llm_prompt": prompt,
+        "llm_response": response
+    }
 
 
 if __name__ == "__main__":
