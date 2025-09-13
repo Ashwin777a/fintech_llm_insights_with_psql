@@ -1,13 +1,19 @@
+import threading
+import uvicorn
+from app import app as fastapi_app
 import streamlit as st
 import requests
-from app import app as fastapi_app
-
-st.title("Daily Fintech Stock Insights")
 
 # --- Run FastAPI in background ---
 def run_api():
     uvicorn.run(fastapi_app, host="0.0.0.0", port=8000)
-#API_URL = "http://localhost:8000/run-daily-pipeline"
+
+threading.Thread(target=run_api, daemon=True).start()
+
+# --- Streamlit frontend ---
+st.title("Daily Fintech Stock Insights")
+
+API_URL = "http://localhost:8000/run-daily-pipeline"  # calls local FastAPI
 data = requests.get(API_URL).json()
 
 st.subheader(f"Stock Data ({data['date']})")
