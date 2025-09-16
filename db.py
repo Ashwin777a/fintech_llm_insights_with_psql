@@ -4,7 +4,8 @@ import os
 
 load_dotenv()
 
-DB_URL = os.getenv("DB_URL")
+#DB_URL = os.getenv("DB_URL")
+DB_URL= "postgresql://postgres:brBdvBFbEYybxlVEZmlTHRUsWoJTmcJx@switchyard.proxy.rlwy.net:45007/railway"
 engine = create_engine(DB_URL)
 
 def create_tables():
